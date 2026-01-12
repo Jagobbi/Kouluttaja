@@ -110,3 +110,12 @@ def search_notes(system: str = "", tag: str = "", text_query: str = ""):
         system_out = meta.get("system", "")
         tags_out = ", ".join(meta.get("tags_list", []))
         print(f"- {p.name} | system: {system_out} | tags: {tags_out}")
+def view_note(filename: str):
+    p = NOTES_DIR / filename
+    if not p.exists():
+        print("\nTiedostoa ei löydy:", p)
+        return
+    print("\n" + "="*60)
+    print(p.name)
+    print("="*60)
+    print(_read_text(p))
