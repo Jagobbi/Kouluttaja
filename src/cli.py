@@ -17,6 +17,8 @@ def _print_note_line(m):
 
 
 def run_cli():
+    chat_history = []  # list of (question, answer)
+
     while True:
         print("\nTietopankki")
         print("1) Lisää muistiinpano")
@@ -24,9 +26,10 @@ def run_cli():
         print("3) Näytä muistiinpano")
         print("4) Liitä tiedosto muistiinpanoon")
         print("5) Vie index.jsonl (AI/RAG)")
-        print("6) Rakenna AI-indeksi (embeddings)")
-        print("7) Kysy AI:lta (GPT)")
-        print("8) Poistu")
+        print("6) Rakenna AI-indeksi (embeddings + liitteet)")
+        print("7) Kysy AI:lta (chat, jatkokysymykset)")
+        print("8) Tyhjennä chat-historia")
+        print("9) Poistu")
 
         choice = input("Valinta: ").strip()
 
@@ -89,34 +92,41 @@ def run_cli():
             print("\n" + msg)
             if meta:
                 _print_note_line(meta)
+                print("Huom: aja kohta 6 uudelleen, jotta liite tulee mukaan AI-hakuun.")
 
         elif choice == "5":
             out = export_index_jsonl()
             print(f"\n✅ Luotu: {out}")
 
         elif choice == "6":
-            print("\nRakennetaan AI-indeksi (tämä käyttää OpenAI Embeddings APIa)...")
-            rebuild_index(verbose=True)
+            print("\nRakennetaan AI-indeksi (muistiinpanot + tuetut liitteet: PDF/DOCX/TXT/MD/CSV)...")
+            rebuild_index(include_attachments=True, verbose=True)
 
         elif choice == "7":
-            q = input("\nKysymys: ").strip()
+            print("\nAI-chat (tyhjä kysymys = takaisin valikkoon)")
             sysf = input("Rajaa järjestelmään (tyhjä = ei): ").strip()
-            try:
-                answer, used = answer_with_gpt(q, system_filter=sysf)
-                print("\n" + answer)
-                # tulosta myös top chunkit debugina
-                if used:
-                    uniq = []
-                    for ch in used:
-                        if ch.note_id not in uniq:
-                            uniq.append(ch.note_id)
-                    print("\n(Lähteet / note_id): " + ", ".join(uniq))
-            except Exception as e:
-                print("\n❌ AI-kysely epäonnistui.")
-                print(str(e))
-                print("Varmista että OPENAI_API_KEY on asetettu ja että olet ajanut ensin kohdan 6 (AI-indeksi).")
+            while True:
+                q = input("\nKysymys: ").strip()
+                if not q:
+                    break
+                try:
+                    answer, used = answer_with_gpt(q, system_filter=sysf, history=chat_history)
+                    print("\n" + answer)
+
+                    # pidä historia
+                    chat_history.append((q, answer))
+
+                except Exception as e:
+                    print("\n❌ AI-kysely epäonnistui:")
+                    print(str(e))
+                    print("Vinkki: varmista OPENAI_API_KEY ja että indeksi on rakennettu (kohta 6).")
+                    break
 
         elif choice == "8":
+            chat_history = []
+            print("\n✅ Chat-historia tyhjennetty.")
+
+        elif choice == "9":
             print("Näkemiin!")
             break
 
