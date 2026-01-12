@@ -1,13 +1,13 @@
-def run_cli():
-    print("Tietopankki käynnissä")
-    print("1) Lisää muistiinpano")
-    print("2) Listaa muistiinpanot")
+from src.notes import add_note
 
-    choice = input("Valinta: ")
+def run_cli():
+    print("\nTietopankki")
+    print("1) Lisää muistiinpano")
+    print("2) Poistu")
+
+    choice = input("Valinta: ").strip()
 
     if choice == "1":
-        print("Muistiinpanon lisäys (tulossa)")
-    elif choice == "2":
-        print("Listaus (tulossa)")
+        add_note()
     else:
-        print("Virheellinen valinta")
+        print("Näkemiin!")
