@@ -99,7 +99,7 @@ def run_cli():
             print(f"\n✅ Luotu: {out}")
 
         elif choice == "6":
-            print("\nRakennetaan AI-indeksi (muistiinpanot + tuetut liitteet: PDF/DOCX/TXT/MD/CSV)...")
+            print("\nRakennetaan AI-indeksi (muistiinpanot + tuetut liitteet: PDF/DOCX/TXT/MD/CSV/PNG/JPG/WEBP)...")
             rebuild_index(include_attachments=True, verbose=True)
 
         elif choice == "7":

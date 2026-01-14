@@ -258,6 +258,62 @@ def attach_file_to_note(note_id: str, source_path: str) -> Tuple[Optional[NoteMe
     update_note(meta, body or "")
     return meta, f"✅ Liitetty tiedosto: {rel}"
 
+def delete_attachment(rel_path: str) -> Tuple[int, str]:
+    """
+    Removes attachment file and unlinks it from any notes.
+    Returns (notes_updated_count, message).
+    """
+    ensure_dirs()
+    rel = Path(rel_path.replace("\\", "/"))
+    if rel.parts and rel.parts[0] == "data":
+        rel = Path(*rel.parts[1:])
+    if rel.parts and rel.parts[0] != "docs":
+        rel = Path("docs") / rel
+
+    full = DATA_DIR / rel
+    updated = 0
+
+    files = sorted(NOTES_DIR.glob("*.md"), reverse=True)
+    for p in files:
+        note_id = p.stem
+        meta, body = read_note(note_id)
+        if not meta:
+            continue
+        if str(rel).replace("\\", "/") in meta.linked_files:
+            meta.linked_files = [f for f in meta.linked_files if f != str(rel).replace("\\", "/")]
+            update_note(meta, body or "")
+            updated += 1
+
+    if full.exists() and full.is_file():
+        try:
+            full.unlink()
+        except Exception:
+            return updated, f"Liitteen poisto epäonnistui: {full}"
+
+    return updated, f"Poistettu liite: {rel}"
+
+def delete_note(note_id: str, remove_files: bool = True) -> str:
+    """
+    Removes a note and optionally its linked files.
+    """
+    ensure_dirs()
+    meta, _body = read_note(note_id)
+    if not meta:
+        return f"Muistiinpanoa ei l\u00f6ydy id: {note_id}"
+
+    if remove_files and meta.linked_files:
+        for lf in list(meta.linked_files):
+            delete_attachment(lf)
+
+    note_path = _note_path(note_id)
+    if note_path.exists():
+        try:
+            note_path.unlink()
+        except Exception:
+            return f"Muistiinpanon poisto ep\u00e4onnistui: {note_path}"
+
+    return f"Poistettu muistiinpano: {note_id}"
+
 def export_index_jsonl(filepath: str = "data/index.jsonl", limit: int = 100000) -> str:
     """
     Makes a simple JSONL index for future AI/RAG:
