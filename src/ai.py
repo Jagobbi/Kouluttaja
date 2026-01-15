@@ -45,6 +45,9 @@ DEBUG_RETRIEVAL = False
 
 BM25_PATH = AI_DATA_DIR / "bm25.pkl"
 
+_index_version = 0
+_last_sync_info: Dict[str, object] = {}
+
 
 def _cosine(a: List[float], b: List[float]) -> float:
     dot = 0.0
@@ -103,10 +106,6 @@ def _db() -> sqlite3.Connection:
         FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
     )
     """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_chunks_note_id ON chunks(note_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_chunks_system ON chunks(system)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_chunks_source_type ON chunks(source_type)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc_key ON chunks(doc_key)")
     con.execute("""
     CREATE TABLE IF NOT EXISTS docs (
         doc_key TEXT PRIMARY KEY,
@@ -114,6 +113,10 @@ def _db() -> sqlite3.Connection:
     )
     """)
     _ensure_schema(con)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_chunks_note_id ON chunks(note_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_chunks_system ON chunks(system)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_chunks_source_type ON chunks(source_type)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc_key ON chunks(doc_key)")
     con.commit()
     return con
 
@@ -198,6 +201,28 @@ def _extract_keywords(text: str, top_n: int = 8) -> List[str]:
             freq[w] = freq.get(w, 0) + 1
         ranked = sorted(freq.items(), key=lambda x: x[1], reverse=True)
         return [w for w, _n in ranked[:top_n]]
+
+def get_current_doc_keys(include_attachments: bool = True) -> set[str]:
+    current: set[str] = set()
+    notes = list_notes(limit=100000)
+    for m in notes:
+        meta, body = read_note(m.id)
+        if not meta:
+            continue
+        current.add(f"{meta.id}::note")
+        if include_attachments and meta.linked_files:
+            for lf in meta.linked_files:
+                rel = Path(lf.replace("\\", "/"))
+                full = Path("data") / rel
+                if full.exists() and full.is_file():
+                    current.add(f"{meta.id}::att::{rel.name}")
+    return current
+
+def sync_index(include_attachments: bool = True, verbose: bool = False) -> None:
+    rebuild_index(include_attachments=include_attachments, verbose=verbose)
+
+def get_last_sync_info() -> Dict[str, object]:
+    return dict(_last_sync_info)
 
 def infer_note_metadata(title: str, body: str) -> Tuple[str, List[str]]:
     client = _openai_client()
@@ -394,6 +419,8 @@ def rebuild_index(include_attachments: bool = True, verbose: bool = True) -> Non
     current_doc_keys: set[str] = set()
     all_chunk_rows = []
     changed = False
+    deleted_doc_keys: List[str] = []
+    deleted_chunks = 0
 
     notes = list_notes(limit=100000)
     if verbose:
@@ -476,8 +503,11 @@ def rebuild_index(include_attachments: bool = True, verbose: bool = True) -> Non
     stale = set(existing_docs.keys()) - current_doc_keys
     for doc_key in stale:
         changed = True
+        cnt = cur.execute("SELECT COUNT(1) FROM chunks WHERE doc_key = ?", (doc_key,)).fetchone()[0]
+        deleted_chunks += int(cnt or 0)
         cur.execute("DELETE FROM chunks WHERE doc_key = ?", (doc_key,))
         cur.execute("DELETE FROM docs WHERE doc_key = ?", (doc_key,))
+        deleted_doc_keys.append(doc_key)
 
     if verbose:
         print(f"Luotu {len(all_chunk_rows)} tekstipalaa (chunks).")
@@ -500,6 +530,14 @@ def rebuild_index(include_attachments: bool = True, verbose: bool = True) -> Non
         con.commit()
 
     if not changed and not all_chunk_rows:
+        _last_sync_info.clear()
+        _last_sync_info.update({
+            "changed": False,
+            "deleted_doc_keys": [],
+            "deleted_chunks": 0,
+            "created_chunks": 0,
+            "index_version": _index_version,
+        })
         if verbose:
             print("Ei muutoksia indeksiin.")
         con.close()
@@ -514,6 +552,7 @@ def rebuild_index(include_attachments: bool = True, verbose: bool = True) -> Non
     """).fetchall()
     chunk_ids = [r[0] for r in rows]
     chunk_texts = [r[1] for r in rows]
+    created_chunks = len(chunk_ids)
 
     BATCH = 64
     if verbose:
@@ -536,7 +575,21 @@ def rebuild_index(include_attachments: bool = True, verbose: bool = True) -> Non
     con.close()
 
     build_bm25_index(DB_PATH, BM25_PATH)
+    if changed:
+        _bump_index_version()
+        _reset_retriever_cache()
+    _last_sync_info.clear()
+    _last_sync_info.update({
+        "changed": changed,
+        "deleted_doc_keys": deleted_doc_keys,
+        "deleted_chunks": deleted_chunks,
+        "created_chunks": created_chunks,
+        "index_version": _index_version,
+    })
     if verbose:
+        if deleted_doc_keys:
+            print(f"Poistettuja dokumentteja: {len(deleted_doc_keys)}")
+            print(f"Poistettuja chunkeja: {deleted_chunks}")
         print(f"✅ Indeksi valmis: {DB_PATH}")
 
 # -------------------------
@@ -689,10 +742,15 @@ def answer_with_gpt(
     history: lista (user_question, assistant_answer) tämän session ajalta.
     Tämä mahdollistaa jatkokysymykset.
     """
+    sync_index(include_attachments=True, verbose=False)
+    sync_info = get_last_sync_info()
+    if history and sync_info.get("deleted_doc_keys"):
+        history = None
     chunks: List[RetrievedChunk] = []
     try:
         retriever = _get_retriever()
         raw = retriever.retrieve(question, system_filter=system_filter)
+        active_docs = get_current_doc_keys(include_attachments=True)
         chunks = [
             RetrievedChunk(
                 note_id=str(r.get("note_id", "")),
@@ -710,6 +768,7 @@ def answer_with_gpt(
                 score=float(r.get("score", 0.0)),
             )
             for r in raw
+            if str(r.get("doc_key", "")) in active_docs
         ]
     except Exception:
         chunks = retrieve(question, system_filter=system_filter, top_k=TOP_K)
@@ -781,6 +840,16 @@ Kirjoita vastaus rakenteella:
 
 _retriever: Optional[HybridRetriever] = None
 
+def _bump_index_version() -> None:
+    global _index_version
+    _index_version += 1
+    if _retriever is not None:
+        _retriever.set_index_version(_index_version)
+
+def _reset_retriever_cache() -> None:
+    global _retriever
+    _retriever = None
+
 def _get_retriever() -> HybridRetriever:
     global _retriever
     if _retriever is None:
@@ -797,11 +866,14 @@ def _get_retriever() -> HybridRetriever:
             debug=DEBUG_RETRIEVAL,
         )
         _retriever = HybridRetriever(DB_PATH, BM25_PATH, embed_texts, cfg)
+        _retriever.set_index_version(_index_version)
     return _retriever
 def debug_retrieve(question: str, system_filter: str = ""):
+    sync_index(include_attachments=True, verbose=False)
     try:
         retriever = _get_retriever()
         raw = retriever.retrieve(question, system_filter=system_filter)
+        active_docs = get_current_doc_keys(include_attachments=True)
         chunks = [
             RetrievedChunk(
                 note_id=str(r.get("note_id", "")),
@@ -819,6 +891,7 @@ def debug_retrieve(question: str, system_filter: str = ""):
                 score=float(r.get("score", 0.0)),
             )
             for r in raw
+            if str(r.get("doc_key", "")) in active_docs
         ]
     except Exception:
         chunks = retrieve(question, system_filter=system_filter, top_k=TOP_K)

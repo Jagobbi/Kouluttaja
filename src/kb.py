@@ -314,6 +314,30 @@ def delete_note(note_id: str, remove_files: bool = True) -> str:
 
     return f"Poistettu muistiinpano: {note_id}"
 
+def append_feedback_record(
+    question: str,
+    answer: str,
+    resolution: str,
+    status: str,
+    note_id: str = "",
+) -> str:
+    """
+    Appends a feedback record for audit/training.
+    """
+    ensure_dirs()
+    out_path = DATA_DIR / "feedback.jsonl"
+    rec = {
+        "question": question,
+        "answer": answer,
+        "resolution": resolution,
+        "status": status,
+        "note_id": note_id,
+        "created_at": _now_iso(),
+    }
+    with out_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return str(out_path)
+
 def export_index_jsonl(filepath: str = "data/index.jsonl", limit: int = 100000) -> str:
     """
     Makes a simple JSONL index for future AI/RAG:

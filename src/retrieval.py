@@ -182,6 +182,10 @@ class HybridRetriever:
                 self._reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
             except Exception:
                 self._reranker = None
+        self._index_version = 0
+
+    def set_index_version(self, version: int) -> None:
+        self._index_version = int(version)
 
     def _embed_query(self, q: str) -> List[float]:
         key = q.strip().lower()
@@ -193,7 +197,7 @@ class HybridRetriever:
         return vec
 
     def retrieve(self, question: str, system_filter: str = "") -> List[Dict[str, object]]:
-        cache_key = f"{question.strip().lower()}||{system_filter.strip().lower()}"
+        cache_key = f"{self._index_version}||{question.strip().lower()}||{system_filter.strip().lower()}"
         cached = self._query_cache.get(cache_key)
         if cached is not None:
             return cached
