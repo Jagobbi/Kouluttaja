@@ -30,6 +30,7 @@ MAX_CONTEXT_CHARS = 35000
 MAX_CONTEXT_TOKENS = 4000
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+ALLOWED_DOC_TYPES = {"law", "instruction", "manual", "note"}
 
 # Hybrid retrieval config
 TOP_K_VECTOR = 60
@@ -707,6 +708,26 @@ def _build_context(chunks: List[RetrievedChunk]) -> str:
     def _est_tokens(s: str) -> int:
         return max(1, len(s) // 4)
 
+    def _doc_type_from_tags(tags: str, source_type: str) -> str:
+        # Doc type is read only from metadata tags; default to "note" to avoid guessing.
+        for raw in (tags or "").split(","):
+            t = raw.strip().lower()
+            if not t:
+                continue
+            if t in ALLOWED_DOC_TYPES:
+                return t
+            if ":" in t:
+                _k, v = t.split(":", 1)
+                if v in ALLOWED_DOC_TYPES:
+                    return v
+            if "=" in t:
+                _k, v = t.split("=", 1)
+                if v in ALLOWED_DOC_TYPES:
+                    return v
+        if source_type == "note":
+            return "note"
+        return "note"
+
     for ch in chunks:
         doc_key = ch.doc_key or ch.note_id
         per_doc[doc_key] = per_doc.get(doc_key, 0) + 1
@@ -715,13 +736,20 @@ def _build_context(chunks: List[RetrievedChunk]) -> str:
 
         page_hint = ""
         if ch.source_type == "attachment" and ch.chunk_index >= 1000:
-            page_hint = f" page={ch.chunk_index//1000}"
+            page_hint = f", page={ch.chunk_index//1000}"
 
-        header = f"[{ch.note_id}] title={ch.note_title} system={ch.system} tags={ch.tags} source={ch.source_type}"
+        doc_id = ch.doc_key or ch.note_id
+        doc_name = ch.note_title or ch.note_id
         if ch.source_type == "attachment" and ch.source_name:
-            header += f":{ch.source_name}{page_hint}"
+            doc_name = ch.source_name
 
-        block = header + "\n" + ch.chunk_text.strip() + "\n"
+        doc_type = _doc_type_from_tags(ch.tags or "", ch.source_type or "")
+        block = (
+            f"[LÄHDE {len(parts) + 1}]\n"
+            f"- Dokumentin nimi: {doc_name} (id={doc_id}{page_hint})\n"
+            f"- Dokumenttityyppi: {doc_type}\n"
+            f"- Sisältö:\n{ch.chunk_text.strip()}\n"
+        )
         block_tokens = _est_tokens(block)
         if total_chars + len(block) > MAX_CONTEXT_CHARS or total_tokens + block_tokens > MAX_CONTEXT_TOKENS:
             break
@@ -795,12 +823,33 @@ def answer_with_gpt(
             lines.append(f"Käyttäjä: {uq}\nAvustaja: {aa}")
         hist_txt = "\n\n".join(lines)
 
+    # Säännöt vähentävät väärän lähdetyypin käyttöä ja ylitulkintaa.
     prompt = f"""Olet käytännönläheinen tekninen tuki ja kouluttaja. Vastaat käyttäjän kysymykseen HYÖDYLLISESTI ja SUORAAN käyttäen annettua kontekstia.
 
 TÄRKEÄ PERIAATE:
 - ÄLÄ sano “katso manuaalista/lähteestä”. Sinun tehtävä on nimenomaan POIMIA ja TIIVISTÄÄ relevantti tieto kontekstista ja muotoilla siitä vastaus.
 - Saat käyttää vain sitä sisältöä, joka löytyy kontekstista. Voit kuitenkin selittää askeleet selkeämmin (järjestää ne, nimetä vaiheet), kunhan et keksi uusia toimintoja tai asetuksia.
 - Jos konteksti ei sisällä vastausta, kerro selkeästi että materiaaleista ei löytynyt vastausta.
+
+ENNEN VASTAAMISTA:
+1) Määrittele, koskeeko kysymys ensisijaisesti lakia, sisäistä ohjetta vai teknistä käyttöä.
+2) Tarkista, sisältävätkö annetut lähteet tämän tyyppistä aineistoa (Dokumenttityyppi-kenttä).
+3) Jos sopivaa lähdettä ei ole, sano selkeästi: "Tietoa ei löydy annetusta aineistosta." ÄLÄ sovella muun tyyppistä aineistoa.
+
+YLITULKINNAN ESTO:
+- ÄLÄ tee oletuksia tai analogioita lähteiden ulkopuolelta.
+- ÄLÄ sovella ohjetta toiseen kontekstiin kuin mihin se on tarkoitettu.
+- ÄLÄ täydennä puuttuvaa tietoa yleisellä tiedolla.
+- Jos tieto puuttuu, vastaa että tietoa ei löydy annetusta aineistosta.
+
+RAJAUS:
+Vastaa kysymykseen VAIN annettujen lähteiden perusteella.
+Jos vastaus vaatii ulkopuolista tietoa, ilmoita ettei aineisto riitä.
+
+DETERMINISTINEN VASTAUS:
+- Käytä vain väitelauseita, joille löytyy suora tuki lähteistä.
+- Liitä jokaisen pääväitteen perään lähdeviite (doc_id tai nimi).
+- ÄLÄ käytä sanoja kuten "yleensä", "tyypillisesti", "todennäköisesti".
 
 TYYLI:
 - Vastaa suomeksi.
@@ -814,7 +863,7 @@ KYSYMYS:
 KESKUSTELUHISTORIA (viimeisimmät, jos jatkokysymyksiä):
 {hist_txt if hist_txt else "(ei historiaa)"}
 
-KONTEKSTI (muistiinpanopalat, lähde note_id hakasuluissa; liitteet source=attachment):
+KONTEKSTI (muotoiltu [LÄHDE i] -lohkoina; Dokumenttityyppi on metadata):
 {context}
 
 PALAUTUS:
@@ -822,7 +871,10 @@ Kirjoita vastaus rakenteella:
 1) Yhteenveto (1–3 lausetta)
 2) Toimintaohjeet (Step-by-step)
 3) Vianrajaus / huomioitavaa (vain jos relevanttia)
-4) Lähteet: listaa käytetyt note_id:t (ja liitteen nimi jos käytit liitettä)
+4) Lähteet: listaa käytetyt doc_id:t tai dokumentin nimet
+5) Luotettavuusarvio:
+- Perustuuko vastaus suoraan lähteisiin: kyllä/ei
+- Puuttuuko oleellista tietoa: kyllä/ei
 """
 
 

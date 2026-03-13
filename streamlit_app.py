@@ -135,10 +135,16 @@ with tabs[2]:
     if not notes:
         st.info("Ei vielä muistiinpanoja.")
     else:
-        for n in notes:
+        def render_note(n):
             header_cols = st.columns([4, 1])
             with header_cols[0]:
-                st.markdown(f"**{n.title}**  \nID: `{n.id}`  \nJärjestelmä: `{n.system or '-'}`")
+                st.markdown(
+                    f"**{n.title}**  \n"
+                    f"ID: `{n.id}`  \n"
+                    f"Järjestelmä: `{n.system or '-'}`  \n"
+                    f"Lisätty: `{n.created_at or '-'}`  \n"
+                    f"Päivitetty: `{n.updated_at or '-'}`"
+                )
             with header_cols[1]:
                 if st.button("Poista muistiinpano", key=f"del_note_{n.id}"):
                     msg = delete_note(n.id, remove_files=True)
@@ -180,6 +186,21 @@ with tabs[2]:
             else:
                 st.write("Liitteet: -")
             st.markdown("---")
+
+        feedback_notes = [n for n in notes if "feedback" in (n.tags or [])]
+        regular_notes = [n for n in notes if "feedback" not in (n.tags or [])]
+
+        browse_tabs = st.tabs(["Muistiinpanot", "Feedback"])
+        with browse_tabs[0]:
+            if not regular_notes:
+                st.info("Ei muistiinpanoja.")
+            for n in regular_notes:
+                render_note(n)
+        with browse_tabs[1]:
+            if not feedback_notes:
+                st.info("Ei palautteita.")
+            for n in feedback_notes:
+                render_note(n)
     info = get_last_sync_info()
     if info:
         st.caption(
