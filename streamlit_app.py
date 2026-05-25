@@ -1,7 +1,13 @@
-import streamlit as st
+import base64
+import html
+import mimetypes
 from pathlib import Path
 
+import streamlit as st
+
 from src.kb import (
+    DOCS_DIR,
+    NOTES_DIR,
     _normalize_tags,
     attach_file_to_note,
     create_note,
@@ -21,7 +27,7 @@ st.title("Tietopankki")
 st.caption("Lisää muistiinpanoja ja tiedostoja, kysy chatista.")
 
 if "chat" not in st.session_state:
-    st.session_state.chat = []  # list of {"role": "user"/"assistant", "content": str}
+    st.session_state.chat = []  # list of {"role": "user"/"assistant", "content": str, "sources": list}
 if "history_pairs" not in st.session_state:
     st.session_state.history_pairs = []  # list of (q,a) for ai.py history
 if "last_qa" not in st.session_state:
@@ -29,6 +35,85 @@ if "last_qa" not in st.session_state:
 
 
 tabs = st.tabs(["Lisää muistiinpano", "Lisää tiedostot", "Selaa", "Chat"])
+
+def _file_mime(path: Path) -> str:
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+def _open_data_url(path: Path) -> str:
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{_file_mime(path)};base64,{data}"
+
+
+def _sources_from_chunks(chunks) -> list[dict]:
+    sources: dict[str, dict] = {}
+
+    for ch in chunks or []:
+        if ch.source_type == "attachment" and ch.source_name:
+            path = DOCS_DIR / ch.source_name
+            key = f"attachment::{ch.source_name}"
+            label = ch.source_name
+            source_type = "Liite"
+        else:
+            path = NOTES_DIR / f"{ch.note_id}.md"
+            key = f"note::{ch.note_id}"
+            label = ch.note_title or ch.note_id
+            source_type = "Muistiinpano"
+
+        if not path.exists() or not path.is_file():
+            continue
+
+        entry = sources.setdefault(
+            key,
+            {
+                "label": label,
+                "type": source_type,
+                "path": str(path),
+                "pages": [],
+            },
+        )
+
+        if ch.source_type == "attachment" and ch.chunk_index >= 1000:
+            page = ch.chunk_index // 1000
+            if page not in entry["pages"]:
+                entry["pages"].append(page)
+
+    return list(sources.values())
+
+
+def _render_sources(sources: list[dict], key_prefix: str) -> None:
+    if not sources:
+        return
+
+    st.markdown("**Avattavat lähteet**")
+    for i, src in enumerate(sources):
+        path = Path(src.get("path", ""))
+        if not path.exists() or not path.is_file():
+            continue
+
+        pages = src.get("pages") or []
+        page_txt = f" | sivut {', '.join(str(p) for p in pages)}" if pages else ""
+        st.caption(f"{src.get('type', 'Lähde')}: {src.get('label', path.name)}{page_txt}")
+
+        cols = st.columns([1, 1, 6])
+        with cols[0]:
+            st.download_button(
+                "Lataa",
+                data=path.read_bytes(),
+                file_name=path.name,
+                mime=_file_mime(path),
+                key=f"{key_prefix}_download_{i}_{path.name}",
+            )
+        with cols[1]:
+            if path.stat().st_size <= 15 * 1024 * 1024:
+                href = html.escape(_open_data_url(path), quote=True)
+                st.markdown(
+                    f'<a href="{href}" target="_blank" rel="noopener noreferrer">Avaa</a>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.caption("Avaa lataamalla")
+
 
 with tabs[0]:
     st.subheader("Uusi muistiinpano")
@@ -214,9 +299,11 @@ with tabs[3]:
     st.subheader("AI-chat")
     system_filter = st.text_input("Rajaa järjestelmään (valinnainen)", value="")
 
-    for m in st.session_state.chat:
+    for msg_idx, m in enumerate(st.session_state.chat):
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
+            if m["role"] == "assistant":
+                _render_sources(m.get("sources", []), f"chat_{msg_idx}")
 
     user_q = st.chat_input("Kysy tietopankilta…")
     if user_q:
@@ -226,14 +313,16 @@ with tabs[3]:
 
         with st.chat_message("assistant"):
             with st.spinner("Ajattelen..."):
-                answer, _used = answer_with_gpt(
+                answer, used = answer_with_gpt(
                     user_q,
                     system_filter=system_filter,
                     history=st.session_state.history_pairs,
                 )
+                sources = _sources_from_chunks(used)
                 st.markdown(answer)
+                _render_sources(sources, "chat_new")
 
-        st.session_state.chat.append({"role": "assistant", "content": answer})
+        st.session_state.chat.append({"role": "assistant", "content": answer, "sources": sources})
         st.session_state.history_pairs.append((user_q, answer))
         st.session_state.last_qa = {"q": user_q, "a": answer}
 
