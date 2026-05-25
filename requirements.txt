@@ -1,0 +1,6 @@
+streamlit
+openai
+pypdf
+python-docx
+scikit-learn
+rank-bm25

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 
+import streamlit as st
+
 from src.kb import NOTES_DIR, DOCS_DIR, read_note, list_notes, _normalize_tags
 from src.retrieval import RetrievalConfig, HybridRetriever, build_bm25_index
 
@@ -146,7 +148,7 @@ def _deserialize_vec(blob: bytes) -> List[float]:
 
 def _openai_client():
     from openai import OpenAI
-    return OpenAI()
+    return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
